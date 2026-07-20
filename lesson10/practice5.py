@@ -3,84 +3,166 @@
 此腳本使用 Playwright 自動化瀏覽器，開啟指定網頁（預設為 example.com），
 驗證頁面標題與主標題是否正確，並將整個頁面截圖存檔。
 支援透過命令列參數選擇不同的瀏覽器引擎。
+
+可作為 CLI 腳本直接執行，也可被 GUI 模組 import 使用。
 """
 
-import argparse  # 解析命令列參數
-from pathlib import Path  # 處理跨平台的檔案路徑
+from __future__ import annotations
 
-from playwright.sync_api import sync_playwright  # Playwright 的同步 API
+import argparse
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
+from playwright.sync_api import sync_playwright
 
-# 目標網站網址（使用 HTTPS 確保連線安全）
 URL = "https://example.com/"
-
-# 截圖輸出目錄，設為此腳本所在資料夾下的 "output" 子資料夾
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
 
-def check_website(browser_name: str = "chromium") -> None:
-    """開啟目標網頁、驗證內容並將頁面截圖存檔。
+@dataclass
+class CheckResult:
+    """儲存單次網站健康檢查結果的資料容器。"""
+
+    url: str = ""
+    final_url: str = ""
+    browser: str = "chromium"
+    http_status: int | None = None
+    response_time_ms: float = 0.0
+    page_title: str = ""
+    heading: str = ""
+    screenshot_path: str = ""
+    success: bool = False
+    message: str = ""
+    error: str = ""
+
+    @property
+    def status_label(self) -> str:
+        """根據 HTTP 狀態碼回傳人類可讀的狀態標籤。"""
+        if self.error:
+            return "失敗"
+        if self.http_status is None:
+            return "失敗"
+        if 200 <= self.http_status < 300:
+            return "成功"
+        if 300 <= self.http_status < 400:
+            return "警告"
+        return "失敗"
+
+    @property
+    def status_color(self) -> str:
+        """回傳對應狀態標籤的色碼（供 GUI 使用）。"""
+        label = self.status_label
+        if label == "成功":
+            return "#2ecc71"
+        if label == "警告":
+            return "#f39c12"
+        return "#e74c3c"
+
+
+def check_website_core(
+    url: str = URL,
+    browser_name: str = "chromium",
+    headless: bool = True,
+    timeout_ms: int = 30_000,
+    output_dir: Path | str = OUTPUT_DIR,
+    log_callback: Any = None,
+) -> CheckResult:
+    """執行網站健康檢查的核心邏輯，回傳結構化結果。
+
+    此函式可被 CLI 與 GUI 共用。GUI 可透過 log_callback 接收即時日誌。
 
     Args:
-        browser_name: 瀏覽器引擎名稱，可選 "chromium"、"firefox" 或 "webkit"。
+        url: 目標網站網址。
+        browser_name: 瀏覽器引擎名稱（chromium / firefox / webkit）。
+        headless: 是否以無頭模式啟動瀏覽器。
+        timeout_ms: 頁面載入逾時毫秒數。
+        output_dir: 截圖儲存目錄。
+        log_callback: 可選的回呼函式，簽名為 fn(message: str)。
+
+    Returns:
+        CheckResult: 包含所有檢查結果的資料物件。
     """
-    # 建立輸出目錄（若已存在則忽略，不會拋出錯誤）
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    out = Path(output_dir)
+    result = CheckResult(url=url, browser=browser_name)
 
-    # 使用 with 語句啟動 Playwright，確保結束時自動釋放所有資源
-    with sync_playwright() as playwright:
-        # 根據傳入的瀏覽器名稱，動態取得對應的瀏覽器類型物件
-        # 例如 "chromium" → playwright.chromium, "firefox" → playwright.firefox
-        browser_type = getattr(playwright, browser_name)
+    def log(msg: str) -> None:
+        if log_callback:
+            log_callback(msg)
 
-        # 啟動瀏覽器實例，headless=True 表示在背景執行，不開啟可見的視窗
-        # 適用於伺服器或 CI/CD 環境
-        browser = browser_type.launch(headless=True)
+    log(f"開始檢查 {url}（瀏覽器: {browser_name}）")
 
-        # 建立新的瀏覽器分頁，並設定視窗大小為 1280×720
-        # 指定視窗大小可確保截圖尺寸一致，避免因不同螢幕解析度而有差異
-        page = browser.new_page(viewport={"width": 1280, "height": 720})
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        result.error = f"無法建立輸出目錄: {exc}"
+        log(result.error)
+        return result
 
-        # 瀏覽器導航至目標網址
-        # wait_until="domcontentloaded" 表示等到 HTML 文件解析完成即返回
-        # （不必等待圖片、樣式表等外部資源載入完成，加快執行速度）
-        response = page.goto(URL, wait_until="domcontentloaded")
+    start = time.perf_counter()
 
-        # 使用無障礙角色定位器（ARIA role）找到名為 "Example Domain" 的標題元素
-        # inner_text() 取得該元素的純文字內容（不含 HTML 標籤）
-        heading = page.get_by_role("heading", name="Example Domain").inner_text()
+    try:
+        with sync_playwright() as playwright:
+            browser_type = getattr(playwright, browser_name)
+            browser = browser_type.launch(headless=headless)
+            page = browser.new_page(viewport={"width": 1280, "height": 720})
 
-        # 組合截圖檔案的完整路徑，檔名包含瀏覽器名稱以便區分不同瀏覽器的截圖
-        screenshot = OUTPUT_DIR / f"homepage_{browser_name}.png"
+            response = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            result.response_time_ms = round((time.perf_counter() - start) * 1000, 1)
 
-        # 將整個頁面（含可滾動區域）截圖並儲存為 PNG 檔案
-        # full_page=True 會擷取完整頁面長度，而非僅可見區域
-        page.screenshot(path=screenshot, full_page=True)
+            result.http_status = response.status if response else None
+            result.final_url = page.url
+            result.page_title = page.title()
 
-        # 印出診斷資訊供開發者確認結果
-        print(f"瀏覽器: {browser_name}")
-        # response.status 回傳 HTTP 狀態碼（200=成功），若無回應則顯示提示
-        print(f"HTTP 狀態: {response.status if response else '無回應'}")
-        # page.title() 取得 HTML 文件的 <title> 標籤內容
-        print(f"頁面標題: {page.title()}")
-        # 印出前面取得的主標題文字
-        print(f"主標題: {heading}")
-        # 印出截圖的儲存路徑，方便使用者快速找到檔案
-        print(f"截圖: {screenshot}")
-        # 關閉瀏覽器，釋放系統資源
-        browser.close()
+            log(f"HTTP 狀態: {result.http_status}")
+            log(f"頁面標題: {result.page_title}")
+
+            try:
+                heading_el = page.get_by_role("heading").first
+                result.heading = heading_el.inner_text(timeout=5000)
+                log(f"主標題: {result.heading}")
+            except Exception:
+                result.heading = "(無法取得)"
+                log("主標題: (無法取得)")
+
+            screenshot = out / f"homepage_{browser_name}.png"
+            page.screenshot(path=screenshot, full_page=True)
+            result.screenshot_path = str(screenshot)
+            log(f"截圖已儲存: {screenshot}")
+
+            browser.close()
+
+        result.success = True
+        result.message = "檢查完成"
+
+    except Exception as exc:
+        result.error = str(exc)
+        result.success = False
+        result.message = f"檢查失敗: {exc}"
+        log(f"錯誤: {exc}")
+
+    log(f"回應時間: {result.response_time_ms} ms")
+    return result
+
+
+def check_website(browser_name: str = "chromium") -> None:
+    """CLI 用包裝函式：執行檢查並列印結果（保持原有行為）。"""
+    result = check_website_core(browser_name=browser_name)
+    print(f"瀏覽器: {result.browser}")
+    print(f"HTTP 狀態: {result.http_status if result.http_status else '無回應'}")
+    print(f"頁面標題: {result.page_title}")
+    print(f"主標題: {result.heading}")
+    print(f"截圖: {result.screenshot_path}")
 
 
 if __name__ == "__main__":
-    # 使用 argparse 建立命令列介面，讓使用者可選擇瀏覽器
-    parser = argparse.ArgumentParser(
-        description="開啟 example.com 網頁並截圖存檔"
-    )
+    parser = argparse.ArgumentParser(description="開啟 example.com 網頁並截圖存檔")
     parser.add_argument(
-        "--browser",  # 命令列參數名稱，例如 --browser firefox
-        choices=["chromium", "firefox", "webkit"],  # 限定可選值
-        default="chromium",  # 預設使用 Chromium 瀏覽器
+        "--browser",
+        choices=["chromium", "firefox", "webkit"],
+        default="chromium",
         help="選擇瀏覽器引擎（預設: chromium）",
     )
-    args = parser.parse_args()  # 解析使用者輸入的參數
-    check_website(args.browser)  # 呼叫主函式並傳入瀏覽器名稱
+    args = parser.parse_args()
+    check_website(args.browser)
