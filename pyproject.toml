@@ -1,17 +1,23 @@
 [project]
 name = "python-playwright"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "網站健康檢查工具 — 使用 Playwright 自動化檢查網站可用性"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "playwright>=1.61.0",
+    "pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+jupyter = [
     "jupyter>=1.1.1",
     "lab>=8.10",
-    "playwright>=1.61.0",
 ]
 
 [dependency-groups]
 dev = [
     "basedpyright>=1.39.9",
     "jupyterlab-lsp>=5.3.0",
+    "pytest>=8.0.0",
 ]

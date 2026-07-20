@@ -1,681 +1,568 @@
-"""網站健康檢查 GUI 應用程式。
-
-使用 tkinter + ttk 建立現代化桌面介面，透過背景執行緒呼叫 Playwright
-執行網站健康檢查，所有 UI 更新透過 after() 安全回到主執行緒。
-"""
+"""繁體中文網站健康檢查桌面 App。"""
 
 from __future__ import annotations
 
-import re
+import os
+import platform
+import queue
 import subprocess
-import sys
 import threading
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+import tkinter as tk
+from tkinter import messagebox, ttk
 
-from practice5 import CheckResult, URL, OUTPUT_DIR, check_website_core
+from PIL import Image, ImageOps, ImageTk
 
-# ---------------------------------------------------------------------------
-# 色彩常數 — 深藍 × 青綠現代色系
-# ---------------------------------------------------------------------------
-COLOR_BG_DARK = "#0f1b2d"  # 深藍主背景
-COLOR_BG_PANEL = "#162a45"  # 卡片 / 面板背景
-COLOR_BG_INPUT = "#1e3a5f"  # 輸入欄位背景
-COLOR_FG = "#e0e6ed"  # 主要文字
-COLOR_FG_DIM = "#8899aa"  # 次要文字
-COLOR_ACCENT = "#00d2d3"  # 青綠強調色
-COLOR_ACCENT_HOVER = "#01a3a4"  # 青綠 hover
-COLOR_SUCCESS = "#2ecc71"  # 綠色（成功）
-COLOR_WARNING = "#f39c12"  # 橘色（警告）
-COLOR_ERROR = "#e74c3c"  # 紅色（失敗）
-COLOR_LOG_BG = "#0b1929"  # 日誌背景
-COLOR_BORDER = "#1f4068"  # 邊框
-
-FONT_TITLE = ("Microsoft JhengHei UI", 16, "bold")
-FONT_LABEL = ("Microsoft JhengHei UI", 10)
-FONT_VALUE = ("Microsoft JhengHei UI", 11, "bold")
-FONT_BUTTON = ("Microsoft JhengHei UI", 10, "bold")
-FONT_LOG = ("Consolas", 9)
-
-# ---------------------------------------------------------------------------
-# 驗證工具
-# ---------------------------------------------------------------------------
-_URL_RE = re.compile(
-    r"^https?://"  # scheme
-    r"[^\s/$.?#]"  # 至少一個非空白非特殊字元
-    r".*$",
-    re.IGNORECASE,
+from practice5 import (
+    OUTPUT_DIR,
+    CheckResult,
+    check_website_core,
+    validate_timeout,
+    validate_url,
 )
 
 
-def validate_url(raw: str) -> tuple[bool, str]:
-    """驗證 URL 格式，回傳 (是否通過, 錯誤訊息)。"""
-    raw = raw.strip()
-    if not raw:
-        return False, "請輸入網址，不可為空。"
-    if not _URL_RE.match(raw):
-        return False, (
-            f"網址格式不正確：「{raw}」\n"
-            "請輸入完整的網址，例如 https://example.com/"
-        )
-    return True, ""
+COLORS = {
+    "navy": "#0B1930",
+    "navy_light": "#122541",
+    "card": "#162B49",
+    "card_alt": "#10213B",
+    "teal": "#20C9B4",
+    "teal_hover": "#35DAC4",
+    "text": "#F3F7FB",
+    "muted": "#9DB0C8",
+    "border": "#294563",
+    "success": "#34D399",
+    "warning": "#FBBF24",
+    "danger": "#FB7185",
+}
 
 
-def validate_timeout(raw: str) -> tuple[bool, int, str]:
-    """驗證逾時輸入，回傳 (是否通過, 轉換後的毫秒數, 錯誤訊息)。"""
-    raw = raw.strip()
-    if not raw:
-        return True, 30_000, ""
-    try:
-        val = int(raw)
-    except ValueError:
-        return False, 0, f"逾時必須為整數，您輸入了「{raw}」。"
-    if val < 1_000:
-        return False, 0, "逾時不可小於 1000 毫秒（1 秒）。"
-    if val > 120_000:
-        return False, 0, "逾時不可超過 120000 毫秒（120 秒）。"
-    return True, val, ""
-
-
-# ---------------------------------------------------------------------------
-# 風格設定
-# ---------------------------------------------------------------------------
-def apply_style(root: tk.Tk) -> None:
-    """套用自訂 ttk 風格，打造現代化深色介面。"""
-    style = ttk.Style(root)
-    root.configure(bg=COLOR_BG_DARK)
-
-    style.theme_use("clam")
-
-    # 全域
-    style.configure(".", background=COLOR_BG_DARK, foreground=COLOR_FG, font=FONT_LABEL)
-    style.configure("TFrame", background=COLOR_BG_DARK)
-    style.configure("Card.TFrame", background=COLOR_BG_PANEL, relief="flat")
-    style.configure("TLabel", background=COLOR_BG_DARK, foreground=COLOR_FG)
-    style.configure(
-        "Card.TLabel", background=COLOR_BG_PANEL, foreground=COLOR_FG, font=FONT_LABEL
-    )
-    style.configure(
-        "Title.TLabel",
-        background=COLOR_BG_DARK,
-        foreground=COLOR_ACCENT,
-        font=FONT_TITLE,
-    )
-    style.configure(
-        "Value.TLabel",
-        background=COLOR_BG_PANEL,
-        foreground=COLOR_FG,
-        font=FONT_VALUE,
-    )
-    style.configure(
-        "Dim.TLabel",
-        background=COLOR_BG_PANEL,
-        foreground=COLOR_FG_DIM,
-        font=FONT_LABEL,
-    )
-    style.configure(
-        "Status.TLabel",
-        background=COLOR_BG_PANEL,
-        foreground=COLOR_FG,
-        font=("Microsoft JhengHei UI", 14, "bold"),
-        anchor="center",
-    )
-
-    # 輸入欄位
-    style.configure(
-        "TEntry",
-        fieldbackground=COLOR_BG_INPUT,
-        foreground=COLOR_FG,
-        insertcolor=COLOR_ACCENT,
-        borderwidth=1,
-        relief="flat",
-    )
-
-    # 開關按鈕
-    style.configure(
-        "Accent.TCheckbutton",
-        background=COLOR_BG_PANEL,
-        foreground=COLOR_ACCENT,
-        font=FONT_LABEL,
-        indicatorcolor=COLOR_BG_INPUT,
-    )
-    style.map(
-        "Accent.TCheckbutton",
-        indicatorcolor=[("selected", COLOR_ACCENT)],
-        background=[("active", COLOR_BG_PANEL)],
-    )
-
-    # 下拉選單
-    style.configure(
-        "TCombobox",
-        fieldbackground=COLOR_BG_INPUT,
-        background=COLOR_BG_INPUT,
-        foreground=COLOR_FG,
-        arrowcolor=COLOR_ACCENT,
-        borderwidth=1,
-        relief="flat",
-    )
-    style.map(
-        "TCombobox",
-        fieldbackground=[("readonly", COLOR_BG_INPUT)],
-        foreground=[("readonly", COLOR_FG)],
-    )
-
-    # 主要按鈕
-    style.configure(
-        "Accent.TButton",
-        background=COLOR_ACCENT,
-        foreground="#0f1b2d",
-        font=FONT_BUTTON,
-        borderwidth=0,
-        padding=(20, 8),
-    )
-    style.map(
-        "Accent.TButton",
-        background=[("active", COLOR_ACCENT_HOVER), ("disabled", COLOR_FG_DIM)],
-        foreground=[("disabled", COLOR_BG_DARK)],
-    )
-
-    # 次要按鈕
-    style.configure(
-        "Secondary.TButton",
-        background=COLOR_BG_INPUT,
-        foreground=COLOR_FG,
-        font=FONT_LABEL,
-        borderwidth=0,
-        padding=(12, 6),
-    )
-    style.map(
-        "Secondary.TButton",
-        background=[("active", COLOR_BORDER)],
-    )
-
-    # 分隔線
-    style.configure("TSeparator", background=COLOR_BORDER)
-
-    # 滾動條
-    style.configure(
-        "Vertical.TScrollbar",
-        background=COLOR_BG_INPUT,
-        troughcolor=COLOR_BG_DARK,
-        arrowcolor=COLOR_ACCENT,
-        borderwidth=0,
-    )
-
-
-# ---------------------------------------------------------------------------
-# 主應用程式
-# ---------------------------------------------------------------------------
-class HealthCheckApp:
-    """網站健康檢查桌面應用程式的主類別。"""
+class WebsiteHealthApp:
+    """網站健康檢查主視窗。"""
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("網站健康檢查工具")
-        self.root.geometry("1200x760")
-        self.root.minsize(1000, 640)
-        self.root.configure(bg=COLOR_BG_DARK)
+        self.result_queue: queue.Queue[CheckResult] = queue.Queue()
+        self.worker: threading.Thread | None = None
+        self.preview_image: ImageTk.PhotoImage | None = None
+        self._closing = False
 
-        apply_style(self.root)
+        self.url_var = tk.StringVar(value="https://example.com/")
+        self.browser_var = tk.StringVar(value="chromium")
+        self.headless_var = tk.BooleanVar(value=True)
+        self.timeout_var = tk.StringVar(value="30000")
+        self.http_var = tk.StringVar(value="—")
+        self.time_var = tk.StringVar(value="—")
+        self.title_var = tk.StringVar(value="尚未執行檢查")
+        self.heading_var = tk.StringVar(value="—")
+        self.final_url_var = tk.StringVar(value="—")
+        self.status_var = tk.StringVar(value="等待檢查")
 
-        self._is_running = False
-        self._worker_thread: threading.Thread | None = None
-
+        self._configure_window()
+        self._configure_styles()
         self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    # ------------------------------------------------------------------
-    # UI 建構
-    # ------------------------------------------------------------------
+    def _configure_window(self) -> None:
+        self.root.title("網站健康檢查")
+        self.root.geometry("1200x760")
+        self.root.minsize(1040, 680)
+        self.root.configure(bg=COLORS["navy"])
+
+    def _configure_styles(self) -> None:
+        style = ttk.Style(self.root)
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+
+        style.configure("App.TFrame", background=COLORS["navy"])
+        style.configure("Card.TFrame", background=COLORS["card"])
+        style.configure("Inset.TFrame", background=COLORS["card_alt"])
+        style.configure(
+            "Title.TLabel",
+            background=COLORS["navy"],
+            foreground=COLORS["text"],
+            font=("TkDefaultFont", 22, "bold"),
+        )
+        style.configure(
+            "Subtitle.TLabel",
+            background=COLORS["navy"],
+            foreground=COLORS["muted"],
+            font=("TkDefaultFont", 10),
+        )
+        style.configure(
+            "CardTitle.TLabel",
+            background=COLORS["card"],
+            foreground=COLORS["text"],
+            font=("TkDefaultFont", 13, "bold"),
+        )
+        style.configure(
+            "Field.TLabel",
+            background=COLORS["card"],
+            foreground=COLORS["muted"],
+            font=("TkDefaultFont", 10, "bold"),
+        )
+        style.configure(
+            "Value.TLabel",
+            background=COLORS["card"],
+            foreground=COLORS["text"],
+            font=("TkDefaultFont", 11),
+        )
+        style.configure(
+            "Metric.TLabel",
+            background=COLORS["card_alt"],
+            foreground=COLORS["text"],
+            font=("TkDefaultFont", 17, "bold"),
+        )
+        style.configure(
+            "MetricName.TLabel",
+            background=COLORS["card_alt"],
+            foreground=COLORS["muted"],
+            font=("TkDefaultFont", 9),
+        )
+        style.configure(
+            "App.TEntry",
+            fieldbackground=COLORS["card_alt"],
+            foreground=COLORS["text"],
+            insertcolor=COLORS["text"],
+            bordercolor=COLORS["border"],
+            lightcolor=COLORS["border"],
+            darkcolor=COLORS["border"],
+            padding=9,
+        )
+        style.configure(
+            "App.TCombobox",
+            fieldbackground=COLORS["card_alt"],
+            background=COLORS["card_alt"],
+            foreground=COLORS["text"],
+            arrowcolor=COLORS["teal"],
+            bordercolor=COLORS["border"],
+            padding=8,
+        )
+        style.map(
+            "App.TCombobox",
+            fieldbackground=[("readonly", COLORS["card_alt"])],
+            foreground=[("readonly", COLORS["text"])],
+        )
+        style.configure(
+            "Primary.TButton",
+            background=COLORS["teal"],
+            foreground=COLORS["navy"],
+            borderwidth=0,
+            padding=(18, 11),
+            font=("TkDefaultFont", 11, "bold"),
+        )
+        style.map(
+            "Primary.TButton",
+            background=[
+                ("active", COLORS["teal_hover"]),
+                ("disabled", COLORS["border"]),
+            ],
+            foreground=[("disabled", COLORS["muted"])],
+        )
+        style.configure(
+            "Secondary.TButton",
+            background=COLORS["navy_light"],
+            foreground=COLORS["text"],
+            bordercolor=COLORS["border"],
+            padding=(14, 8),
+            font=("TkDefaultFont", 10, "bold"),
+        )
+        style.map("Secondary.TButton", background=[("active", COLORS["border"])])
+        style.configure(
+            "App.TCheckbutton",
+            background=COLORS["card"],
+            foreground=COLORS["text"],
+            indicatorcolor=COLORS["card_alt"],
+            font=("TkDefaultFont", 10),
+        )
+        style.map(
+            "App.TCheckbutton",
+            background=[("active", COLORS["card"])],
+            indicatorcolor=[("selected", COLORS["teal"])],
+        )
+        style.configure(
+            "App.Horizontal.TProgressbar",
+            troughcolor=COLORS["card_alt"],
+            background=COLORS["teal"],
+            bordercolor=COLORS["card_alt"],
+        )
+
     def _build_ui(self) -> None:
-        """建立所有 UI 元件。"""
-        # 頂部標題列
-        header = ttk.Frame(self.root, style="TFrame")
-        header.pack(fill="x", padx=20, pady=(16, 4))
-        ttk.Label(header, text="🔍 網站健康檢查工具", style="Title.TLabel").pack(
+        shell = ttk.Frame(self.root, style="App.TFrame", padding=(24, 12, 24, 12))
+        shell.pack(fill="both", expand=True)
+        shell.columnconfigure(0, weight=1)
+        shell.rowconfigure(1, weight=1)
+
+        header = ttk.Frame(shell, style="App.TFrame")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ttk.Label(header, text="網站健康檢查", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(
+            header,
+            text="快速檢查 HTTP 狀態、頁面內容與實際畫面",
+            style="Subtitle.TLabel",
+        ).pack(anchor="w", pady=(3, 0))
+
+        content = ttk.Frame(shell, style="App.TFrame")
+        content.grid(row=1, column=0, sticky="nsew")
+        content.columnconfigure(0, weight=0, minsize=330)
+        content.columnconfigure(1, weight=1)
+        content.rowconfigure(0, weight=1)
+
+        self._build_controls(content)
+        self._build_results(content)
+        self._build_log(shell)
+
+    def _build_controls(self, parent: ttk.Frame) -> None:
+        card = ttk.Frame(parent, style="Card.TFrame", padding=22)
+        card.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        card.columnconfigure(0, weight=1)
+
+        ttk.Label(card, text="檢查設定", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 20)
+        )
+        ttk.Label(card, text="網站 URL", style="Field.TLabel").grid(
+            row=1, column=0, sticky="w", pady=(0, 6)
+        )
+        self.url_entry = ttk.Entry(card, textvariable=self.url_var, style="App.TEntry")
+        self.url_entry.grid(row=2, column=0, sticky="ew", pady=(0, 17))
+
+        ttk.Label(card, text="瀏覽器引擎", style="Field.TLabel").grid(
+            row=3, column=0, sticky="w", pady=(0, 6)
+        )
+        self.browser_combo = ttk.Combobox(
+            card,
+            textvariable=self.browser_var,
+            values=("chromium", "firefox", "webkit"),
+            state="readonly",
+            style="App.TCombobox",
+        )
+        self.browser_combo.grid(row=4, column=0, sticky="ew", pady=(0, 17))
+
+        ttk.Label(card, text="Timeout（毫秒）", style="Field.TLabel").grid(
+            row=5, column=0, sticky="w", pady=(0, 6)
+        )
+        self.timeout_entry = ttk.Entry(
+            card, textvariable=self.timeout_var, style="App.TEntry"
+        )
+        self.timeout_entry.grid(row=6, column=0, sticky="ew", pady=(0, 15))
+
+        self.headless_check = ttk.Checkbutton(
+            card,
+            text="以 headless 模式執行",
+            variable=self.headless_var,
+            style="App.TCheckbutton",
+        )
+        self.headless_check.grid(row=7, column=0, sticky="w", pady=(0, 18))
+
+        self.start_button = ttk.Button(
+            card,
+            text="開始檢查",
+            command=self.start_check,
+            style="Primary.TButton",
+        )
+        self.start_button.grid(row=8, column=0, sticky="ew")
+
+        self.progress = ttk.Progressbar(
+            card, mode="indeterminate", style="App.Horizontal.TProgressbar"
+        )
+        self.progress.grid(row=9, column=0, sticky="ew", pady=(16, 0))
+
+        tip = ttk.Label(
+            card,
+            text="提示：首次使用前請安裝對應的 Playwright 瀏覽器。",
+            style="Field.TLabel",
+            wraplength=280,
+            justify="left",
+        )
+        tip.grid(row=10, column=0, sticky="sw", pady=(18, 0))
+        card.rowconfigure(10, weight=1)
+
+    def _build_results(self, parent: ttk.Frame) -> None:
+        card = ttk.Frame(parent, style="Card.TFrame", padding=20)
+        card.grid(row=0, column=1, sticky="nsew")
+        card.columnconfigure(0, weight=1)
+        card.rowconfigure(3, weight=1)
+
+        title_row = ttk.Frame(card, style="Card.TFrame")
+        title_row.grid(row=0, column=0, sticky="ew", pady=(0, 13))
+        ttk.Label(title_row, text="檢查結果", style="CardTitle.TLabel").pack(
             side="left"
         )
+        self.status_label = tk.Label(
+            title_row,
+            textvariable=self.status_var,
+            bg=COLORS["border"],
+            fg=COLORS["text"],
+            padx=12,
+            pady=5,
+            font=("TkDefaultFont", 9, "bold"),
+        )
+        self.status_label.pack(side="right")
 
-        ttk.Separator(self.root, orient="horizontal").pack(
-            fill="x", padx=20, pady=(0, 8)
+        metrics = ttk.Frame(card, style="Card.TFrame")
+        metrics.grid(row=1, column=0, sticky="ew", pady=(0, 13))
+        metrics.columnconfigure((0, 1), weight=1)
+        self._metric_card(metrics, 0, "HTTP 狀態", self.http_var)
+        self._metric_card(metrics, 1, "回應時間", self.time_var)
+
+        details = ttk.Frame(card, style="Card.TFrame")
+        details.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        details.columnconfigure(1, weight=1)
+        self._detail_row(details, 0, "頁面標題", self.title_var)
+        self._detail_row(details, 1, "主標題", self.heading_var)
+        self._detail_row(details, 2, "最終 URL", self.final_url_var)
+
+        preview_frame = ttk.Frame(card, style="Inset.TFrame", padding=1)
+        preview_frame.grid(row=3, column=0, sticky="nsew")
+        preview_frame.columnconfigure(0, weight=1)
+        preview_frame.rowconfigure(0, weight=1)
+        self.preview_label = tk.Label(
+            preview_frame,
+            text="截圖預覽會顯示在這裡",
+            bg=COLORS["card_alt"],
+            fg=COLORS["muted"],
+            font=("TkDefaultFont", 11),
+            compound="center",
+        )
+        self.preview_label.grid(row=0, column=0, sticky="nsew")
+
+    def _metric_card(
+        self, parent: ttk.Frame, column: int, name: str, variable: tk.StringVar
+    ) -> None:
+        frame = ttk.Frame(parent, style="Inset.TFrame", padding=(15, 10))
+        frame.grid(
+            row=0,
+            column=column,
+            sticky="ew",
+            padx=(0, 6) if column == 0 else (6, 0),
+        )
+        ttk.Label(frame, text=name, style="MetricName.TLabel").pack(anchor="w")
+        ttk.Label(frame, textvariable=variable, style="Metric.TLabel").pack(
+            anchor="w", pady=(2, 0)
         )
 
-        # 主體容器（左右雙欄）
-        body = ttk.Frame(self.root, style="TFrame")
-        body.pack(fill="both", expand=True, padx=20, pady=(0, 8))
-        body.columnconfigure(0, weight=3)
-        body.columnconfigure(1, weight=5)
-        body.rowconfigure(0, weight=1)
-
-        self._build_left_panel(body)
-        self._build_right_panel(body)
-
-        # 底部區域
-        ttk.Separator(self.root, orient="horizontal").pack(
-            fill="x", padx=20, pady=(0, 4)
+    def _detail_row(
+        self, parent: ttk.Frame, row: int, name: str, variable: tk.StringVar
+    ) -> None:
+        ttk.Label(parent, text=name, style="Field.TLabel").grid(
+            row=row, column=0, sticky="nw", padx=(0, 14), pady=3
         )
-        self._build_bottom_panel()
+        ttk.Label(
+            parent,
+            textvariable=variable,
+            style="Value.TLabel",
+            wraplength=620,
+            justify="left",
+        ).grid(row=row, column=1, sticky="ew", pady=3)
 
-    # ---- 左側面板 ----
-    def _build_left_panel(self, parent: ttk.Frame) -> None:
-        """建立左側輸入控制面板。"""
-        card = ttk.Frame(parent, style="Card.TFrame", padding=16)
-        card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+    def _build_log(self, parent: ttk.Frame) -> None:
+        card = ttk.Frame(parent, style="Card.TFrame", padding=(18, 12))
+        card.grid(row=2, column=0, sticky="ew", pady=(14, 0))
         card.columnconfigure(0, weight=1)
 
-        row = 0
-
-        # 標題
-        ttk.Label(card, text="檢查設定", style="Value.TLabel").grid(
-            row=row, column=0, sticky="w", pady=(0, 12)
-        )
-        row += 1
-
-        # URL 輸入
-        ttk.Label(card, text="網址 (URL)", style="Card.TLabel").grid(
-            row=row, column=0, sticky="w", pady=(4, 2)
-        )
-        row += 1
-        self._url_var = tk.StringVar(value=URL)
-        url_entry = ttk.Entry(card, textvariable=self._url_var, width=36)
-        url_entry.grid(row=row, column=0, sticky="ew", pady=(0, 8), ipady=4)
-        row += 1
-
-        # 瀏覽器選擇
-        ttk.Label(card, text="瀏覽器引擎", style="Card.TLabel").grid(
-            row=row, column=0, sticky="w", pady=(4, 2)
-        )
-        row += 1
-        self._browser_var = tk.StringVar(value="chromium")
-        browser_combo = ttk.Combobox(
-            card,
-            textvariable=self._browser_var,
-            values=["chromium", "firefox", "webkit"],
-            state="readonly",
-            width=33,
-        )
-        browser_combo.grid(row=row, column=0, sticky="ew", pady=(0, 8), ipady=4)
-        row += 1
-
-        # Headless 開關
-        self._headless_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            card,
-            text="無頭模式 (Headless)",
-            variable=self._headless_var,
-            style="Accent.TCheckbutton",
-        ).grid(row=row, column=0, sticky="w", pady=(4, 8))
-        row += 1
-
-        # Timeout 輸入
-        ttk.Label(card, text="逾時時間 (毫秒)", style="Card.TLabel").grid(
-            row=row, column=0, sticky="w", pady=(4, 2)
-        )
-        row += 1
-        self._timeout_var = tk.StringVar(value="30000")
-        timeout_entry = ttk.Entry(card, textvariable=self._timeout_var, width=36)
-        timeout_entry.grid(row=row, column=0, sticky="ew", pady=(0, 8), ipady=4)
-        row += 1
-
-        ttk.Label(card, text="範圍：1000 ~ 120000 ms", style="Dim.TLabel").grid(
-            row=row, column=0, sticky="w", pady=(0, 12)
-        )
-        row += 1
-
-        # 開始按鈕
-        self._start_btn = ttk.Button(
-            card,
-            text="▶  開始檢查",
-            style="Accent.TButton",
-            command=self._on_start,
-        )
-        self._start_btn.grid(row=row, column=0, sticky="ew", pady=(0, 8), ipady=4)
-        row += 1
-
-        # 進度指示
-        self._progress_var = tk.StringVar(value="")
-        ttk.Label(card, textvariable=self._progress_var, style="Dim.TLabel").grid(
-            row=row, column=0, sticky="w"
-        )
-
-    # ---- 右側面板 ----
-    def _build_right_panel(self, parent: ttk.Frame) -> None:
-        """建立右側結果顯示面板。"""
-        card = ttk.Frame(parent, style="Card.TFrame", padding=16)
-        card.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-        card.columnconfigure(0, weight=1)
-        card.columnconfigure(1, weight=1)
-
-        row = 0
-
-        ttk.Label(card, text="檢查結果", style="Value.TLabel").grid(
-            row=row, column=0, columnspan=2, sticky="w", pady=(0, 12)
-        )
-        row += 1
-
-        # 狀態徽章
-        self._status_var = tk.StringVar(value="—")
-        self._status_label = ttk.Label(
-            card, textvariable=self._status_var, style="Status.TLabel"
-        )
-        self._status_label.grid(
-            row=row, column=0, columnspan=2, sticky="ew", pady=(0, 12), ipady=8
-        )
-        # 設定狀態徽章的初始背景
-        self._status_frame = card
-        row += 1
-
-        # HTTP 狀態
-        row = self._make_result_row(card, row, "HTTP 狀態碼")
-        self._http_var = tk.StringVar(value="—")
-
-        # 回應時間
-        row = self._make_result_row(card, row, "回應時間")
-        self._time_var = tk.StringVar(value="—")
-
-        # 頁面標題
-        row = self._make_result_row(card, row, "頁面標題")
-        self._title_var = tk.StringVar(value="—")
-
-        # 主標題
-        row = self._make_result_row(card, row, "主標題 (H1)")
-        self._heading_var = tk.StringVar(value="—")
-
-        # 最終 URL
-        row = self._make_result_row(card, row, "最終 URL")
-        self._final_url_var = tk.StringVar(value="—")
-
-        ttk.Separator(card, orient="horizontal").grid(
-            row=row, column=0, columnspan=2, sticky="ew", pady=8
-        )
-        row += 1
-
-        # 截圖預覽
-        ttk.Label(card, text="截圖預覽", style="Card.TLabel").grid(
-            row=row, column=0, columnspan=2, sticky="w", pady=(4, 4)
-        )
-        row += 1
-
-        self._preview_label = ttk.Label(card, text="尚無截圖", style="Dim.TLabel")
-        self._preview_label.grid(
-            row=row, column=0, columnspan=2, sticky="nsew", pady=(0, 0)
-        )
-        card.rowconfigure(row, weight=1)
-        self._preview_image: Any = None  # 防止被 GC 回收
-
-    def _make_result_row(
-        self, parent: ttk.Frame, row: int, label_text: str
-    ) -> int:
-        """建立一個「標籤 + 值」的結果列，回傳下一列索引。"""
-        ttk.Label(parent, text=label_text, style="Card.TLabel").grid(
-            row=row, column=0, sticky="w", pady=3, padx=(0, 8)
-        )
-        var = tk.StringVar(value="—")
-        ttk.Label(parent, textvariable=var, style="Value.TLabel").grid(
-            row=row, column=1, sticky="w", pady=3
-        )
-        # 把 var 設定到對應屬性（由呼叫端在外部綁定）
-        setattr(self, f"_row_{row}_var", var)
-        return row + 1
-
-    # ---- 底部面板 ----
-    def _build_bottom_panel(self) -> None:
-        """建立底部日誌與操作按鈕區域。"""
-        bottom = ttk.Frame(self.root, style="TFrame")
-        bottom.pack(fill="both", expand=True, padx=20, pady=(0, 12))
-
-        # 日誌標題列
-        log_header = ttk.Frame(bottom, style="TFrame")
-        log_header.pack(fill="x", pady=(0, 4))
-        ttk.Label(log_header, text="執行日誌", style="Card.TLabel").pack(side="left")
-
-        # 按鈕列
-        btn_frame = ttk.Frame(log_header, style="TFrame")
-        btn_frame.pack(side="right")
+        toolbar = ttk.Frame(card, style="Card.TFrame")
+        toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ttk.Label(toolbar, text="執行日誌", style="CardTitle.TLabel").pack(side="left")
         ttk.Button(
-            btn_frame,
-            text="📁 開啟輸出資料夾",
+            toolbar,
+            text="清除結果",
+            command=self.clear_results,
             style="Secondary.TButton",
-            command=self._open_output_dir,
-        ).pack(side="left", padx=(0, 6))
+        ).pack(side="right")
         ttk.Button(
-            btn_frame,
-            text="🗑 清除結果",
+            toolbar,
+            text="開啟輸出資料夾",
+            command=self.open_output_folder,
             style="Secondary.TButton",
-            command=self._clear_results,
-        ).pack(side="left")
+        ).pack(side="right", padx=(0, 8))
 
-        # 可滾動日誌區
-        log_frame = ttk.Frame(bottom, style="Card.TFrame", padding=4)
-        log_frame.pack(fill="both", expand=True)
-
-        self._log_text = tk.Text(
+        log_frame = ttk.Frame(card, style="Inset.TFrame")
+        log_frame.grid(row=1, column=0, sticky="ew")
+        log_frame.columnconfigure(0, weight=1)
+        self.log_text = tk.Text(
             log_frame,
-            bg=COLOR_LOG_BG,
-            fg=COLOR_FG_DIM,
-            font=FONT_LOG,
-            insertbackground=COLOR_ACCENT,
-            selectbackground=COLOR_BG_INPUT,
-            borderwidth=0,
-            highlightthickness=0,
-            state="disabled",
+            height=4,
             wrap="word",
+            bg=COLORS["card_alt"],
+            fg=COLORS["muted"],
+            insertbackground=COLORS["text"],
+            relief="flat",
+            padx=10,
+            pady=8,
+            font=("TkFixedFont", 9),
+            state="disabled",
         )
-        scrollbar = ttk.Scrollbar(
-            log_frame, orient="vertical", command=self._log_text.yview
-        )
-        self._log_text.configure(yscrollcommand=scrollbar.set)
+        scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=scrollbar.set)
+        self.log_text.grid(row=0, column=0, sticky="ew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self._append_log("系統已就緒，請設定網址後開始檢查。")
 
-        self._log_text.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-
-    # ------------------------------------------------------------------
-    # 結果值的綁定（修正 _make_result_row 的屬性映射）
-    # ------------------------------------------------------------------
-    def _bind_result_vars(self) -> None:
-        """將結果面板的各個 tk.StringVar 綁定到對應屬性。"""
-        # _make_result_row 用 setattr 動態建立了 _row_{n}_var，
-        # 但我們需要知道正確的列號。改用明確綁定更可靠。
-        # 實際上我們在 _build_right_panel 中直接使用 self._xxx_var，
-        # 所以這裡不需要額外綁定。此方法保留為擴充用途。
-        pass
-
-    # ------------------------------------------------------------------
-    # 事件處理
-    # ------------------------------------------------------------------
-    def _on_start(self) -> None:
-        """「開始檢查」按鈕被點擊時觸發。"""
-        if self._is_running:
+    def start_check(self) -> None:
+        if self.worker and self.worker.is_alive():
             return
 
-        # 驗證 URL
-        url_ok, url_err = validate_url(self._url_var.get())
-        if not url_ok:
-            messagebox.showwarning("輸入錯誤", url_err)
+        try:
+            url = validate_url(self.url_var.get())
+            timeout_ms = validate_timeout(self.timeout_var.get())
+        except ValueError as exc:
+            self._set_status("輸入錯誤", "danger")
+            self._append_log(f"輸入錯誤：{exc}")
+            messagebox.showwarning("請檢查輸入", str(exc), parent=self.root)
             return
 
-        # 驗證逾時
-        timeout_ok, timeout_ms, timeout_err = validate_timeout(
-            self._timeout_var.get()
+        browser = self.browser_var.get()
+        headless = self.headless_var.get()
+        self._set_busy(True)
+        self._set_status("檢查中…", "warning")
+        self._append_log(
+            f"開始檢查 {url}（{browser}、{'headless' if headless else '有介面'}）"
         )
-        if not timeout_ok:
-            messagebox.showwarning("輸入錯誤", timeout_err)
-            return
 
-        self._is_running = True
-        self._start_btn.configure(state="disabled")
-        self._progress_var.set("⏳ 正在檢查中，請稍候…")
-        self._set_status_badge("檢查中…", COLOR_WARNING)
-
-        url = self._url_var.get().strip()
-        browser_name = self._browser_var.get()
-        headless = self._headless_var.get()
-
-        self._append_log(f"[啟動] 網址={url}  瀏覽器={browser_name}  headless={headless}")
-
-        # 在背景執行緒中執行 Playwright，避免阻塞 UI
-        self._worker_thread = threading.Thread(
+        self.worker = threading.Thread(
             target=self._run_check,
-            args=(url, browser_name, headless, timeout_ms),
+            args=(url, browser, headless, timeout_ms),
+            name="website-check-worker",
             daemon=True,
         )
-        self._worker_thread.start()
+        self.worker.start()
+        self.root.after(100, self._poll_result_queue)
 
     def _run_check(
-        self,
-        url: str,
-        browser_name: str,
-        headless: bool,
-        timeout_ms: int,
+        self, url: str, browser: str, headless: bool, timeout_ms: int
     ) -> None:
-        """背景執行緒：執行檢查後透過 root.after 安全更新 UI。"""
+        result = check_website_core(
+            url=url,
+            browser_name=browser,
+            headless=headless,
+            timeout_ms=timeout_ms,
+        )
+        self.result_queue.put(result)
+
+    def _poll_result_queue(self) -> None:
+        if self._closing:
+            return
         try:
-            result = check_website_core(
-                url=url,
-                browser_name=browser_name,
-                headless=headless,
-                timeout_ms=timeout_ms,
-                output_dir=OUTPUT_DIR,
-                log_callback=lambda msg: self.root.after(0, self._append_log, msg),
-            )
-        except Exception as exc:
-            result = CheckResult(
-                url=url,
-                browser=browser_name,
-                error=str(exc),
-                message=f"未預期的錯誤: {exc}",
-            )
-
-        # 安全地回到主執行緒更新 UI
-        self.root.after(0, self._on_check_done, result)
-
-    def _on_check_done(self, result: CheckResult) -> None:
-        """檢查完成後在主執行緒更新所有結果元件。"""
-        self._is_running = False
-        self._start_btn.configure(state="normal")
-        self._progress_var.set("")
-
-        # 狀態徽章
-        self._set_status_badge(result.status_label, result.status_color)
-
-        # 結果欄位
-        self._http_var.set(
-            str(result.http_status) if result.http_status else "無回應"
-        )
-        self._time_var.set(f"{result.response_time_ms} ms")
-        self._title_var.set(result.page_title or "—")
-        self._heading_var.set(result.heading or "—")
-        self._final_url_var.set(result.final_url or result.url)
-
-        # 截圖預覽
-        self._load_preview(result.screenshot_path)
-
-        self._append_log(f"[完成] {result.message}")
-
-    # ------------------------------------------------------------------
-    # UI 輔助方法
-    # ------------------------------------------------------------------
-    def _set_status_badge(self, text: str, color: str) -> None:
-        """更新狀態徽章文字與背景色。"""
-        self._status_var.set(text)
-        # ttk.Label 不直接支援 background 動態變色，
-        # 改用 tk.Label 實現徽章效果
-        try:
-            self._status_label.destroy()
-        except Exception:
-            pass
-
-        self._status_label = tk.Label(
-            self._status_frame,
-            text=text,
-            bg=color,
-            fg="#0f1b2d",
-            font=("Microsoft JhengHei UI", 14, "bold"),
-            anchor="center",
-            padx=16,
-            pady=6,
-        )
-        self._status_label.grid(
-            row=2, column=0, columnspan=2, sticky="ew", pady=(0, 12)
-        )
-
-    def _append_log(self, message: str) -> None:
-        """在日誌區末尾追加一行訊息。"""
-        self._log_text.configure(state="normal")
-        self._log_text.insert("end", message + "\n")
-        self._log_text.see("end")
-        self._log_text.configure(state="disabled")
-
-    def _load_preview(self, path: str) -> None:
-        """載入截圖到預覽區（使用 Pillow 若可用，否則顯示路徑）。"""
-        if not path or not Path(path).is_file():
-            self._preview_label.configure(text="截圖檔案不存在")
+            result = self.result_queue.get_nowait()
+        except queue.Empty:
+            if self.worker and self.worker.is_alive():
+                self.root.after(100, self._poll_result_queue)
+            else:
+                self._set_busy(False)
             return
 
-        try:
-            from PIL import Image, ImageTk
+        self._set_busy(False)
+        self._display_result(result)
 
-            img = Image.open(path)
-            # 縮圖以符合預覽區大小
-            max_w, max_h = 480, 260
-            img.thumbnail((max_w, max_h), Image.LANCZOS)
-            self._preview_image = ImageTk.PhotoImage(img)
-            self._preview_label.configure(
-                image=self._preview_image, text="", compound="center"
-            )
-        except ImportError:
-            self._preview_label.configure(
-                text=f"截圖已儲存:\n{path}\n（安裝 Pillow 可顯示預覽）"
-            )
-        except Exception as exc:
-            self._preview_label.configure(text=f"預覽載入失敗: {exc}")
+    def _display_result(self, result: CheckResult) -> None:
+        self.http_var.set(str(result.http_status) if result.http_status is not None else "無回應")
+        self.time_var.set(
+            f"{result.response_time_ms:.1f} ms" if result.response_time_ms else "—"
+        )
+        self.title_var.set(result.page_title or "（頁面沒有標題）")
+        self.heading_var.set(result.main_heading or "（找不到 h1 主標題）")
+        self.final_url_var.set(result.final_url or result.url)
 
-    def _open_output_dir(self) -> None:
-        """用系統檔案管理員開啟截圖輸出目錄。"""
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        path_str = str(OUTPUT_DIR)
-        if sys.platform == "win32":
-            subprocess.Popen(["explorer", path_str])
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", path_str])
+        if not result.success:
+            self._set_status("檢查失敗", "danger")
+            self._append_log(f"檢查失敗：{result.error_message}")
+            messagebox.showerror("檢查失敗", result.error_message, parent=self.root)
+            return
+
+        status = result.http_status
+        if status is None or status >= 500:
+            self._set_status("失敗", "danger")
+        elif status >= 400:
+            self._set_status("警告", "warning")
         else:
-            subprocess.Popen(["xdg-open", path_str])
-        self._append_log(f"[系統] 已開啟資料夾: {path_str}")
+            self._set_status("成功", "success")
 
-    def _clear_results(self) -> None:
-        """清除所有結果顯示與日誌。"""
-        self._http_var.set("—")
-        self._time_var.set("—")
-        self._title_var.set("—")
-        self._heading_var.set("—")
-        self._final_url_var.set("—")
-        self._set_status_badge("—", COLOR_BG_INPUT)
+        self._append_log(
+            f"完成：HTTP {status if status is not None else '無回應'}，"
+            f"回應時間 {result.response_time_ms:.1f} ms"
+        )
+        if result.screenshot_path:
+            self._append_log(f"截圖已儲存：{result.screenshot_path}")
+            self._load_preview(Path(result.screenshot_path))
 
+    def _load_preview(self, path: Path) -> None:
         try:
-            self._preview_label.configure(
-                image="", text="尚無截圖", compound="center"
+            with Image.open(path) as source:
+                image = ImageOps.contain(source.convert("RGB"), (760, 250))
+            self.preview_image = ImageTk.PhotoImage(image)
+            self.preview_label.configure(image=self.preview_image, text="")
+        except (OSError, ValueError) as exc:
+            self.preview_image = None
+            self.preview_label.configure(image="", text="無法載入截圖預覽")
+            self._append_log(f"截圖預覽載入失敗：{exc}")
+
+    def _set_busy(self, busy: bool) -> None:
+        state = "disabled" if busy else "normal"
+        self.start_button.configure(state=state)
+        if busy:
+            self.progress.start(10)
+        else:
+            self.progress.stop()
+
+    def _set_status(self, text: str, kind: str) -> None:
+        background = {
+            "success": COLORS["success"],
+            "warning": COLORS["warning"],
+            "danger": COLORS["danger"],
+        }.get(kind, COLORS["border"])
+        foreground = COLORS["navy"] if kind in {"success", "warning"} else COLORS["text"]
+        self.status_var.set(text)
+        self.status_label.configure(bg=background, fg=foreground)
+
+    def _append_log(self, message: str) -> None:
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", f"[{timestamp}] {message}\n")
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+    def clear_results(self) -> None:
+        self.http_var.set("—")
+        self.time_var.set("—")
+        self.title_var.set("尚未執行檢查")
+        self.heading_var.set("—")
+        self.final_url_var.set("—")
+        self.preview_image = None
+        self.preview_label.configure(image="", text="截圖預覽會顯示在這裡")
+        self._set_status("等待檢查", "neutral")
+        self.log_text.configure(state="normal")
+        self.log_text.delete("1.0", "end")
+        self.log_text.configure(state="disabled")
+        self._append_log("畫面結果已清除；已儲存的截圖不受影響。")
+
+    def open_output_folder(self) -> None:
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            system = platform.system()
+            if system == "Windows":
+                os.startfile(OUTPUT_DIR)  # type: ignore[attr-defined]
+            elif system == "Darwin":
+                subprocess.Popen(["open", str(OUTPUT_DIR)])
+            else:
+                subprocess.Popen(["xdg-open", str(OUTPUT_DIR)])
+            self._append_log(f"已開啟輸出資料夾：{OUTPUT_DIR}")
+        except OSError as exc:
+            messagebox.showerror(
+                "無法開啟資料夾",
+                f"請手動開啟：\n{OUTPUT_DIR}\n\n系統訊息：{exc}",
+                parent=self.root,
             )
-        except Exception:
-            pass
-        self._preview_image = None
 
-        self._log_text.configure(state="normal")
-        self._log_text.delete("1.0", "end")
-        self._log_text.configure(state="disabled")
-
-        self._append_log("[系統] 結果已清除")
+    def _on_close(self) -> None:
+        self._closing = True
+        self.root.destroy()
 
 
-# ---------------------------------------------------------------------------
-# 程式進入點
-# ---------------------------------------------------------------------------
 def main() -> None:
-    """啟動 GUI 應用程式。"""
     root = tk.Tk()
-    root.withdraw()  # 先隱藏，等佈局完成後再顯示
-    HealthCheckApp(root)
-    root.deiconify()
+    WebsiteHealthApp(root)
     root.mainloop()
 
 
