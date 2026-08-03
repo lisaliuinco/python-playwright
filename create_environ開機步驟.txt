@@ -1,0 +1,26 @@
+1. 下載安裝 git, zed, 登入 github
+2. 在終端機裡面，告訴git使用者的資料
+    git config --global user.name "John Doe"
+    git config --global user.email johndoe@example.com
+3. 下載專案
+    git clone github專案網址
+4. 安裝 uv
+    powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+5. 關閉終端機再重新開啟，這樣電腦可以識別到uv安裝好了
+6. 安裝專案環境
+    uv venv
+7. 更新套件
+    uv sync
+8. 安裝playwright
+    uv run playwright install
+9. Security安全性設定
+    Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+10. 啟動虛擬環境
+    .venv\Scripts\activate
+
+Notes
+To use TUI, install nodejs first
+    go to opencode website
+    in terminal, run this command
+    npm i -g opencode-ai
+    type **opencode** to exucute the TUI
